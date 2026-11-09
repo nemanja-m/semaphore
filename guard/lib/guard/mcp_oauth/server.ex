@@ -292,8 +292,8 @@ defmodule Guard.McpOAuth.Server do
   # Mirrors Guard.GrpcServers.AuthServer: an OIDC web sign-in stores
   # id_provider="OIDC" plus an oidc_session_id backed by a DB session row; a
   # legacy Devise/warden sign-in stores the user id in warden.user.user.key.
-  # Both live inside the signed and encrypted session cookie. Anything else is
-  # treated as unauthenticated.
+  # Both live inside the signed and encrypted session cookie. Anything else, and
+  # the session of a blocked or deactivated user, is treated as unauthenticated.
   defp session_user_id(conn) do
     case get_session(conn, "id_provider") do
       "OIDC" -> oidc_session_user_id(conn)
@@ -305,7 +305,8 @@ defmodule Guard.McpOAuth.Server do
     with session_id when is_binary(session_id) and session_id != "" <-
            get_session(conn, "oidc_session_id"),
          {:ok, session} <- Guard.Store.OIDCSession.get(session_id),
-         false <- Guard.Store.OIDCSession.expired?(session) do
+         false <- Guard.Store.OIDCSession.expired?(session),
+         {:ok, _user} <- Guard.FrontRepo.User.active_user_by_id(session.user_id) do
       {:ok, session.user_id}
     else
       _ -> :error
@@ -313,8 +314,11 @@ defmodule Guard.McpOAuth.Server do
   end
 
   defp warden_session_user_id(conn) do
-    case get_session(conn, "warden.user.user.key") do
-      [[user_id], _salt] when is_binary(user_id) and user_id != "" -> {:ok, user_id}
+    with [[user_id], salt] when is_binary(user_id) and user_id != "" and is_binary(salt) <-
+           get_session(conn, "warden.user.user.key"),
+         {:ok, _user} <- Guard.FrontRepo.User.active_user_by_id_and_salt(user_id, salt) do
+      {:ok, user_id}
+    else
       _ -> :error
     end
   end

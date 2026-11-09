@@ -1,0 +1,64 @@
+name: Build guard image
+
+on:
+  push:
+    branches:
+      - ci/guard-image-build
+  workflow_dispatch:
+
+env:
+  IMAGE: nemanjam/semaphore-guard
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          # Native arm64 runner: the Erlang build crashes under QEMU emulation.
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: guard/Dockerfile
+          target: runner
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            APP_NAME=guard
+            BUILD_ENV=prod
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=guard-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=guard-${{ matrix.arch }}
+
+  # One tag for both architectures: Docker pulls the one matching the host.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - run: >-
+          docker buildx imagetools create -t "$IMAGE:$GITHUB_SHA"
+          "$IMAGE:$GITHUB_SHA-amd64" "$IMAGE:$GITHUB_SHA-arm64"
