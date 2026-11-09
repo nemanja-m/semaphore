@@ -44,6 +44,7 @@ defmodule FrontWeb.Router do
     plug(FrontWeb.Plug.AssignOrgInfo)
     plug(FrontWeb.Plug.AssignBillingInfo)
     plug(FrontWeb.Plug.SentryContext)
+    plug(FrontWeb.Plug.OAuthFlash)
     plug(FrontWeb.Plugs.LicenseVerifier)
     plug(Traceman.Plug.TraceHeaders)
     plug(Front.Tracing.TracingPlug)
@@ -642,6 +643,8 @@ defmodule FrontWeb.Router do
     get("/workflows/:workflow_id", WorkflowController, :show)
 
     get("/workflows/:workflow_id/status", WorkflowController, :status)
+    get("/workflows/:workflow_id/map", WorkflowController, :map)
+    get("/workflows/:workflow_id/map/pipelines", WorkflowController, :map_pipelines)
     get("/workflows/:workflow_id/summary", TestResultsController, :pipeline_summary)
     get("/workflows/:workflow_id/report", ReportController, :workflow)
     get("/workflows/:workflow_id/summary/:pipeline_id", TestResultsController, :details)
