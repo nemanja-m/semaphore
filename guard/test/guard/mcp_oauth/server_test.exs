@@ -751,12 +751,31 @@ defmodule Guard.McpOAuth.Server.Test do
       assert {200, first} = refresh(tokens["refresh_token"], client.client_id)
 
       used_at = DateTime.utc_now() |> DateTime.add(-20) |> DateTime.truncate(:second)
-      used = from(t in McpOAuthRefreshToken, where: not is_nil(t.used_at))
-      Repo.update_all(used, set: [used_at: used_at])
+      [used] = Repo.all(from(t in McpOAuthRefreshToken, where: not is_nil(t.used_at)))
+      used |> Ecto.Changeset.change(used_at: used_at) |> Repo.update!()
 
       assert {200, second} = refresh(tokens["refresh_token"], client.client_id)
       refute first["refresh_token"] == second["refresh_token"]
-      assert [^used_at] = Repo.all(select(used, [t], t.used_at))
+      assert Repo.reload!(used).used_at == used_at
+    end
+
+    test "leaves only the token issued last live after a reuse within the grace period", %{
+      client: client,
+      tokens: tokens
+    } do
+      assert {200, first} = refresh(tokens["refresh_token"], client.client_id)
+      assert {200, second} = refresh(tokens["refresh_token"], client.client_id)
+
+      used_at = DateTime.utc_now() |> DateTime.add(-31) |> DateTime.truncate(:second)
+
+      from(t in McpOAuthRefreshToken, where: not is_nil(t.used_at))
+      |> Repo.update_all(set: [used_at: used_at])
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(first["refresh_token"], client.client_id)
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(second["refresh_token"], client.client_id)
     end
 
     test "revokes the family when a rotated token is reused after the grace period", %{

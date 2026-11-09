@@ -28,36 +28,39 @@ defmodule Guard.Store.McpOAuthRefreshToken do
   end
 
   @doc """
-  Locks a token and its family, preloaded, using SELECT FOR UPDATE.
-  Must be called inside a Repo.transaction.
+  Locks a token's family, then the token, using SELECT FOR UPDATE, and returns
+  the token with its family. Must be called inside a Repo.transaction.
   """
   @spec lock_by_token(String.t()) :: {:ok, McpOAuthRefreshToken.t()} | {:error, :not_found}
   def lock_by_token(token) when is_binary(token) do
+    # FOR UPDATE locks in FROM order. Locking the family first keeps rotate/1,
+    # which writes the family's other tokens, from deadlocking.
     query =
-      from(t in McpOAuthRefreshToken,
-        join: f in assoc(t, :family),
+      from(f in McpOAuthRefreshTokenFamily,
+        join: t in McpOAuthRefreshToken,
+        on: t.family_id == f.id,
         where: t.token_hash == ^hash(token),
         lock: "FOR UPDATE",
-        preload: [family: f]
+        select: {t, f}
       )
 
     case Repo.one(query) do
       nil -> {:error, :not_found}
-      refresh_token -> {:ok, refresh_token}
+      {refresh_token, family} -> {:ok, %{refresh_token | family: family}}
     end
   end
 
   @doc """
-  Marks a locked token used, unless it already is, and returns the next token
-  of its family.
+  Marks every unused token of a locked token's family used, so that only the
+  token it returns is live.
   """
   @spec rotate(McpOAuthRefreshToken.t()) :: String.t()
   def rotate(%McpOAuthRefreshToken{} = refresh_token) do
     now = now()
 
-    if is_nil(refresh_token.used_at) do
-      refresh_token |> Ecto.Changeset.change(used_at: now) |> Repo.update!()
-    end
+    McpOAuthRefreshToken
+    |> where([t], t.family_id == ^refresh_token.family_id and is_nil(t.used_at))
+    |> Repo.update_all(set: [used_at: now, updated_at: now])
 
     insert_token(refresh_token.family, now)
   end
