@@ -3,8 +3,9 @@ defmodule Guard.McpOAuth.Token do
   OAuth 2.0 Token Endpoint for MCP OAuth.
 
   Exchanges authorization codes and refresh tokens for access tokens. A refresh
-  token rotates on every use; reusing a rotated one after a short grace period
-  revokes every token rotated from the same authorization code.
+  token rotates on every use, which leaves only the new token live; reusing an
+  older one after a short grace period revokes every token rotated from the same
+  authorization code.
   """
 
   require Logger
