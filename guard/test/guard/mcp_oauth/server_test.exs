@@ -16,10 +16,14 @@ defmodule Guard.McpOAuth.Server.Test do
     user_id = Ecto.UUID.generate()
     user_name = "session-user-#{System.unique_integer([:positive])}"
     {:ok, _user} = Support.Factories.RbacUser.insert(user_id, user_name)
+    {:ok, _user} = Support.Factories.FrontUser.insert(id: user_id, name: user_name)
 
     other_user_id = Ecto.UUID.generate()
     other_user_name = "other-user-#{System.unique_integer([:positive])}"
     {:ok, _other_user} = Support.Factories.RbacUser.insert(other_user_id, other_user_name)
+
+    {:ok, _other_user} =
+      Support.Factories.FrontUser.insert(id: other_user_id, name: other_user_name)
 
     System.put_env("MCP_OAUTH_JWT_KEYS", "test-secret-key-for-mcp-oauth-tests")
 
@@ -739,7 +743,10 @@ defmodule Guard.McpOAuth.Server.Test do
   @computers_redirect_uri "https://semaphore.computer.test/auth/callback"
   @computers_audience "https://api.semaphore.computer.test"
 
-  defp computers_authorize(user_id, redirect_uri \\ @computers_redirect_uri) do
+  defp computers_authorize(user_id, redirect_uri \\ @computers_redirect_uri),
+    do: computers_authorize_as(session_headers(user_id), redirect_uri)
+
+  defp computers_authorize_as(headers, redirect_uri \\ @computers_redirect_uri) do
     query =
       "?" <>
         URI.encode_query(%{
@@ -752,11 +759,14 @@ defmodule Guard.McpOAuth.Server.Test do
         })
 
     {:ok, response} =
-      HTTPoison.get(mcp_oauth_url("/authorize#{query}"), session_headers(user_id),
-        follow_redirect: false
-      )
+      HTTPoison.get(mcp_oauth_url("/authorize#{query}"), headers, follow_redirect: false)
 
     response
+  end
+
+  defp warden_session_headers(user_id, salt) do
+    value = Guard.Session.encrypt_cookie(%{"warden.user.user.key" => [[user_id], salt]})
+    [{"cookie", "#{Application.get_env(:guard, :session_key)}=#{value}"} | default_headers()]
   end
 
   defp computers_token(code, params) do
@@ -805,6 +815,45 @@ defmodule Guard.McpOAuth.Server.Test do
       assert String.starts_with?(location, @computers_redirect_uri <> "?")
       assert extract_code(location)
       assert location =~ "state=computers-state"
+    end
+
+    test "signs nobody in whose user is blocked or deactivated", %{user_id: user_id} do
+      update = fn change ->
+        Guard.FrontRepo.User
+        |> Guard.FrontRepo.get!(user_id)
+        |> Ecto.Changeset.change(change)
+        |> Guard.FrontRepo.update!()
+      end
+
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      for change <- [[blocked_at: now], [deactivated: true]] do
+        update.(change)
+
+        location = user_id |> computers_authorize() |> get_header("location")
+        assert String.starts_with?(location, "https://id.localhost/login?")
+
+        update.(blocked_at: nil, deactivated: false)
+      end
+
+      location = user_id |> computers_authorize() |> get_header("location")
+      assert String.starts_with?(location, @computers_redirect_uri)
+    end
+
+    test "signs a warden session in only with its user's salt", %{user_id: user_id} do
+      Guard.FrontRepo.User
+      |> Guard.FrontRepo.get!(user_id)
+      |> Ecto.Changeset.change(salt: "salt")
+      |> Guard.FrontRepo.update!()
+
+      response = user_id |> warden_session_headers("salt") |> computers_authorize_as()
+      assert response |> get_header("location") |> String.starts_with?(@computers_redirect_uri)
+
+      response = user_id |> warden_session_headers("other") |> computers_authorize_as()
+
+      assert response
+             |> get_header("location")
+             |> String.starts_with?("https://id.localhost/login?")
     end
 
     test "sends the browser nowhere it was not configured with", %{user_id: user_id} do
