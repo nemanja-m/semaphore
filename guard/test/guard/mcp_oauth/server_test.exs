@@ -1200,7 +1200,6 @@ defmodule Guard.McpOAuth.Server.Test do
     test "gives an MCP client its RS256 tokens for its MCP server, and refreshes them", %{
       user_id: user_id
     } do
-      {:ok, _} = Support.Factories.FrontUser.insert(id: user_id)
       client = create_test_client()
 
       {consent, {200, tokens}} = resource_flow(client, user_id, @computers_mcp_resource)
