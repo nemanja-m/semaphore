@@ -60,7 +60,10 @@ defmodule Guard.McpOAuth.AuthCodeCleanerTest do
       now = DateTime.utc_now() |> DateTime.truncate(:second)
 
       for client_id <- ~w(live expired-token expired-family revoked-today revoked-long-ago) do
-        Guard.Store.McpOAuthRefreshToken.create(client_id, user_id, "mcp")
+        Guard.Store.McpOAuthRefreshToken.create(
+          %Guard.Repo.McpOAuthAuthCode{client_id: client_id, user_id: user_id},
+          "mcp"
+        )
       end
 
       from(t in McpOAuthRefreshToken,

@@ -10,6 +10,7 @@ defmodule Guard.Repo.McpOAuthRefreshTokenFamily do
   @type t :: %__MODULE__{}
 
   schema "mcp_oauth_refresh_token_families" do
+    field(:auth_code_id, Ecto.UUID)
     field(:client_id, :string)
     field(:scope, :string)
     field(:resource, :string)
