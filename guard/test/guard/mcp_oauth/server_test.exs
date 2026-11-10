@@ -720,59 +720,6 @@ defmodule Guard.McpOAuth.Server.Test do
     end
   end
 
-  describe "POST /revoke" do
-    setup %{user_id: user_id} do
-      client = create_test_client()
-
-      {:ok, client: client, tokens: exchange_code(client, user_id)}
-    end
-
-    defp revoke(params) do
-      {:ok, response} =
-        HTTPoison.post(mcp_oauth_url("/revoke"), URI.encode_query(params), form_headers())
-
-      {response.status_code, response.body}
-    end
-
-    test "revokes the token's family, from a token already rotated", %{
-      client: client,
-      tokens: tokens
-    } do
-      assert {200, rotated} = refresh(tokens["refresh_token"], client.client_id)
-
-      assert {200, ""} =
-               revoke(%{"token" => tokens["refresh_token"], "client_id" => client.client_id})
-
-      assert {400, %{"error" => "invalid_grant"}} =
-               refresh(rotated["refresh_token"], client.client_id)
-    end
-
-    test "answers the same for an unknown token, or one already revoked", %{
-      client: client,
-      tokens: tokens
-    } do
-      params = %{"token" => tokens["refresh_token"], "client_id" => client.client_id}
-
-      assert {200, ""} = revoke(%{params | "token" => "unknown"})
-      assert {200, ""} = revoke(params)
-      assert {200, ""} = revoke(Map.put(params, "token_type_hint", "refresh_token"))
-    end
-
-    test "leaves another client's token live", %{client: client, tokens: tokens} do
-      other = create_test_client()
-
-      assert {200, ""} =
-               revoke(%{"token" => tokens["refresh_token"], "client_id" => other.client_id})
-
-      assert {200, _} = refresh(tokens["refresh_token"], client.client_id)
-    end
-
-    test "needs the token and the client" do
-      assert {400, body} = revoke(%{"token" => "a-token"})
-      assert Jason.decode!(body)["error"] == "invalid_request"
-    end
-  end
-
   describe "POST /token with a refresh token" do
     setup %{user_id: user_id} do
       client = create_test_client()
@@ -930,6 +877,59 @@ defmodule Guard.McpOAuth.Server.Test do
   # ====================
   # Grant selection -> token: identity binding
   # ====================
+
+  describe "POST /revoke" do
+    setup %{user_id: user_id} do
+      client = create_test_client()
+
+      {:ok, client: client, tokens: exchange_code(client, user_id)}
+    end
+
+    defp revoke(params) do
+      {:ok, response} =
+        HTTPoison.post(mcp_oauth_url("/revoke"), URI.encode_query(params), form_headers())
+
+      {response.status_code, response.body}
+    end
+
+    test "revokes the token's family, from a token already rotated", %{
+      client: client,
+      tokens: tokens
+    } do
+      assert {200, rotated} = refresh(tokens["refresh_token"], client.client_id)
+
+      assert {200, ""} =
+               revoke(%{"token" => tokens["refresh_token"], "client_id" => client.client_id})
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(rotated["refresh_token"], client.client_id)
+    end
+
+    test "answers the same for an unknown token, or one already revoked", %{
+      client: client,
+      tokens: tokens
+    } do
+      params = %{"token" => tokens["refresh_token"], "client_id" => client.client_id}
+
+      assert {200, ""} = revoke(%{params | "token" => "unknown"})
+      assert {200, ""} = revoke(params)
+      assert {200, ""} = revoke(Map.put(params, "token_type_hint", "refresh_token"))
+    end
+
+    test "leaves another client's token live", %{client: client, tokens: tokens} do
+      other = create_test_client()
+
+      assert {200, ""} =
+               revoke(%{"token" => tokens["refresh_token"], "client_id" => other.client_id})
+
+      assert {200, _} = refresh(tokens["refresh_token"], client.client_id)
+    end
+
+    test "needs the token and the client" do
+      assert {400, body} = revoke(%{"token" => "a-token"})
+      assert Jason.decode!(body)["error"] == "invalid_request"
+    end
+  end
 
   describe "authorize -> grant -> token identity binding" do
     test "an authenticated session mints a token bound to that session user", %{user_id: user_id} do
