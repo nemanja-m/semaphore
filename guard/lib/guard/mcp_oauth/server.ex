@@ -9,6 +9,7 @@ defmodule Guard.McpOAuth.Server do
     clients without a Client ID Metadata Document
   - /authorize (Authorization endpoint)
   - /token (Token endpoint)
+  - /revoke (RFC 7009 - Token Revocation, for refresh tokens)
   - /grant-selection (Consent UI)
 
   Guard acts as the OAuth Authorization Server, minting JWTs with HS256.
@@ -18,7 +19,7 @@ defmodule Guard.McpOAuth.Server do
 
   use Plug.Router
 
-  alias Guard.McpOAuth.{Authorize, Computers, JWT, Metadata, Register, Token}
+  alias Guard.McpOAuth.{Authorize, Computers, JWT, Metadata, Register, Revoke, Token}
   alias Guard.Store.{McpOAuthAuthCode, McpOAuthClient}
 
   # Note: Plug.Parsers is NOT used here because Guard.Id.Api already parses
@@ -256,6 +257,34 @@ defmodule Guard.McpOAuth.Server do
 
   # CORS preflight for token
   options "/token" do
+    conn
+    |> put_resp_header("access-control-allow-origin", "*")
+    |> put_resp_header("access-control-allow-methods", "POST, OPTIONS")
+    |> put_resp_header("access-control-allow-headers", "content-type")
+    |> send_resp(204, "")
+  end
+
+  # ====================
+  # Token Revocation (RFC 7009)
+  # ====================
+
+  post "/revoke" do
+    case Revoke.revoke(conn.body_params) do
+      :ok ->
+        conn
+        |> put_resp_header("access-control-allow-origin", "*")
+        |> put_resp_header("cache-control", "no-store")
+        |> send_resp(200, "")
+
+      {:error, status, error_response} ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> put_resp_header("access-control-allow-origin", "*")
+        |> send_resp(status, Jason.encode!(error_response))
+    end
+  end
+
+  options "/revoke" do
     conn
     |> put_resp_header("access-control-allow-origin", "*")
     |> put_resp_header("access-control-allow-methods", "POST, OPTIONS")

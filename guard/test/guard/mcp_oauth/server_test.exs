@@ -301,6 +301,8 @@ defmodule Guard.McpOAuth.Server.Test do
       assert is_binary(body["authorization_endpoint"])
       assert is_binary(body["token_endpoint"])
       assert is_binary(body["registration_endpoint"])
+      assert body["revocation_endpoint"] == "#{body["issuer"]}/revoke"
+      assert body["revocation_endpoint_auth_methods_supported"] == ["none", "client_secret_post"]
       assert body["client_id_metadata_document_supported"] == true
       assert is_list(body["response_types_supported"])
       assert body["grant_types_supported"] == ["authorization_code", "refresh_token"]
@@ -876,6 +878,59 @@ defmodule Guard.McpOAuth.Server.Test do
   # Grant selection -> token: identity binding
   # ====================
 
+  describe "POST /revoke" do
+    setup %{user_id: user_id} do
+      client = create_test_client()
+
+      {:ok, client: client, tokens: exchange_code(client, user_id)}
+    end
+
+    defp revoke(params) do
+      {:ok, response} =
+        HTTPoison.post(mcp_oauth_url("/revoke"), URI.encode_query(params), form_headers())
+
+      {response.status_code, response.body}
+    end
+
+    test "revokes the token's family, from a token already rotated", %{
+      client: client,
+      tokens: tokens
+    } do
+      assert {200, rotated} = refresh(tokens["refresh_token"], client.client_id)
+
+      assert {200, ""} =
+               revoke(%{"token" => tokens["refresh_token"], "client_id" => client.client_id})
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(rotated["refresh_token"], client.client_id)
+    end
+
+    test "answers the same for an unknown token, or one already revoked", %{
+      client: client,
+      tokens: tokens
+    } do
+      params = %{"token" => tokens["refresh_token"], "client_id" => client.client_id}
+
+      assert {200, ""} = revoke(%{params | "token" => "unknown"})
+      assert {200, ""} = revoke(params)
+      assert {200, ""} = revoke(Map.put(params, "token_type_hint", "refresh_token"))
+    end
+
+    test "leaves another client's token live", %{client: client, tokens: tokens} do
+      other = create_test_client()
+
+      assert {200, ""} =
+               revoke(%{"token" => tokens["refresh_token"], "client_id" => other.client_id})
+
+      assert {200, _} = refresh(tokens["refresh_token"], client.client_id)
+    end
+
+    test "needs the token and the client" do
+      assert {400, body} = revoke(%{"token" => "a-token"})
+      assert Jason.decode!(body)["error"] == "invalid_request"
+    end
+  end
+
   describe "authorize -> grant -> token identity binding" do
     test "an authenticated session mints a token bound to that session user", %{user_id: user_id} do
       client = create_test_client()
@@ -1103,6 +1158,34 @@ defmodule Guard.McpOAuth.Server.Test do
 
       assert response.status_code == 400
       refute get_header(response, "location")
+    end
+
+    test "revokes its refresh token only with its secret", %{user_id: user_id} do
+      code = user_id |> computers_authorize() |> get_header("location") |> extract_code()
+      token_resp = computers_token(code, %{"client_secret" => @computers_client_secret})
+      tokens = Jason.decode!(token_resp.body)
+      form = %{"token" => tokens["refresh_token"], "client_id" => @computers_client_id}
+
+      {:ok, refused} =
+        HTTPoison.post(mcp_oauth_url("/revoke"), URI.encode_query(form), form_headers())
+
+      assert refused.status_code == 401
+      assert Jason.decode!(refused.body)["error"] == "invalid_client"
+
+      secret = %{"client_secret" => @computers_client_secret}
+      assert {200, rotated} = refresh(tokens["refresh_token"], @computers_client_id, secret)
+
+      {:ok, revoked} =
+        HTTPoison.post(
+          mcp_oauth_url("/revoke"),
+          URI.encode_query(Map.merge(form, secret)),
+          form_headers()
+        )
+
+      assert revoked.status_code == 200
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(rotated["refresh_token"], @computers_client_id, secret)
     end
 
     test "issues RS256 tokens for its API, which the key at /jwks checks", %{user_id: user_id} do
