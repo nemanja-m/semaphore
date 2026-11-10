@@ -718,6 +718,69 @@ defmodule Guard.McpOAuth.Server.Test do
     end
   end
 
+  describe "POST /token with an authorization code presented again" do
+    setup %{user_id: user_id} do
+      client = create_test_client()
+      auth_code = create_test_auth_code(user_id, client.client_id)
+      {200, tokens} = post_token(code_params(auth_code.code, client.client_id))
+
+      {:ok, client: client, auth_code: auth_code, tokens: tokens}
+    end
+
+    defp code_params(code, client_id) do
+      %{
+        "grant_type" => "authorization_code",
+        "code" => code,
+        "redirect_uri" => @redirect_uri,
+        "client_id" => client_id,
+        "code_verifier" => @code_verifier
+      }
+    end
+
+    test "revokes the refresh tokens the code issued", %{
+      client: client,
+      auth_code: auth_code,
+      tokens: tokens
+    } do
+      assert {200, rotated} = refresh(tokens["refresh_token"], client.client_id)
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               post_token(code_params(auth_code.code, client.client_id))
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               refresh(rotated["refresh_token"], client.client_id)
+
+      [family] = Repo.all(McpOAuthRefreshTokenFamily)
+      assert family.auth_code_id == auth_code.id
+      refute is_nil(family.revoked_at)
+    end
+
+    test "revokes nothing when presented by another client, or expired", %{
+      client: client,
+      auth_code: auth_code,
+      tokens: tokens
+    } do
+      other = create_test_client()
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               post_token(code_params(auth_code.code, other.client_id))
+
+      auth_code
+      |> Ecto.Changeset.change(
+        expires_at: DateTime.utc_now() |> DateTime.add(-1) |> DateTime.truncate(:second)
+      )
+      |> Repo.update!()
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               post_token(code_params(auth_code.code, client.client_id))
+
+      assert {400, %{"error" => "invalid_grant"}} =
+               post_token(code_params("unknown-code", client.client_id))
+
+      assert {200, _} = refresh(tokens["refresh_token"], client.client_id)
+    end
+  end
+
   describe "POST /token with a refresh token" do
     setup %{user_id: user_id} do
       client = create_test_client()
