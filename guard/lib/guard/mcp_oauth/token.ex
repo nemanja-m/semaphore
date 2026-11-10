@@ -48,27 +48,42 @@ defmodule Guard.McpOAuth.Token do
   end
 
   defp exchange_code(params) do
-    Repo.transaction(fn ->
-      with {:ok, auth_code} <- lock_code(params),
-           :ok <- validate_pkce(auth_code, params),
-           :ok <- validate_redirect_uri(auth_code, params),
-           :ok <- validate_resource(auth_code, params),
-           {:ok, _} <- McpOAuthAuthCode.mark_code_used(auth_code),
-           scope = scope(auth_code.client_id, auth_code.resource),
-           {:ok, response} <- issue(auth_code.user_id, scope, auth_code.resource) do
-        refresh_token =
-          McpOAuthRefreshToken.create(
-            auth_code.client_id,
-            auth_code.user_id,
-            scope,
-            auth_code.resource
-          )
+    case Repo.transaction(fn -> exchange_locked_code(params) end) do
+      {:error, :unusable_code} ->
+        revoke_replayed(params["code"], params["client_id"])
 
-        Map.put(response, "refresh_token", refresh_token)
-      else
-        {:error, error_map} -> Repo.rollback(error_map)
-      end
-    end)
+        {:error,
+         error_response("invalid_grant", "Invalid, expired, or already used authorization code")}
+
+      result ->
+        result
+    end
+  end
+
+  # A used code presented again may have been stolen (RFC 6749 4.1.2), so what
+  # it issued is revoked. The code's FOR UPDATE waited for the exchange that
+  # used it to commit, so its family is there to revoke.
+  defp revoke_replayed(code, client_id) do
+    for user_id <- McpOAuthRefreshToken.revoke_issued_from_code(code, client_id) do
+      Logger.warning(
+        "[McpOAuth.Token] Revoked refresh tokens, an authorization code was reused: " <>
+          "client=#{client_id} user=#{user_id}"
+      )
+    end
+  end
+
+  defp exchange_locked_code(params) do
+    with {:ok, auth_code} <- lock_code(params),
+         :ok <- validate_pkce(auth_code, params),
+         :ok <- validate_redirect_uri(auth_code, params),
+         :ok <- validate_resource(auth_code, params),
+         {:ok, _} <- McpOAuthAuthCode.mark_code_used(auth_code),
+         scope = scope(auth_code.client_id, auth_code.resource),
+         {:ok, response} <- issue(auth_code.user_id, scope, auth_code.resource) do
+      Map.put(response, "refresh_token", McpOAuthRefreshToken.create(auth_code, scope))
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
   end
 
   # Never rolled back, so that a family revoked by a failing request stays revoked.
@@ -138,11 +153,7 @@ defmodule Guard.McpOAuth.Token do
             {:ok, auth_code}
 
           {:error, :invalid_or_used} ->
-            {:error,
-             error_response(
-               "invalid_grant",
-               "Invalid, expired, or already used authorization code"
-             )}
+            {:error, :unusable_code}
         end
     end
   end

@@ -7,21 +7,25 @@ defmodule Guard.Store.McpOAuthRefreshToken do
   import Ecto.Query
 
   alias Guard.Repo
-  alias Guard.Repo.{McpOAuthRefreshToken, McpOAuthRefreshTokenFamily}
+  alias Guard.Repo.{McpOAuthAuthCode, McpOAuthRefreshToken, McpOAuthRefreshTokenFamily}
 
   @revoked_retention_seconds 86_400
 
-  @doc "Starts a family of refresh tokens and returns its first token."
-  @spec create(String.t(), String.t(), String.t(), String.t() | nil) :: String.t()
-  def create(client_id, user_id, scope, resource \\ nil) do
+  @doc """
+  Starts the family of refresh tokens an authorization code issues, and returns
+  its first token.
+  """
+  @spec create(McpOAuthAuthCode.t(), String.t()) :: String.t()
+  def create(%McpOAuthAuthCode{} = auth_code, scope) do
     now = now()
 
     family =
       Repo.insert!(%McpOAuthRefreshTokenFamily{
-        client_id: client_id,
-        user_id: user_id,
+        auth_code_id: auth_code.id,
+        client_id: auth_code.client_id,
+        user_id: auth_code.user_id,
         scope: scope,
-        resource: resource,
+        resource: auth_code.resource,
         expires_at: DateTime.add(now, max_age_seconds())
       })
 
@@ -64,6 +68,27 @@ defmodule Guard.Store.McpOAuthRefreshToken do
     |> Repo.update_all(set: [used_at: now, updated_at: now])
 
     insert_token(refresh_token.family, now)
+  end
+
+  @doc """
+  Revokes the live families issued from the client's authorization code, once
+  used and not yet expired, and returns their users.
+  """
+  @spec revoke_issued_from_code(String.t(), String.t()) :: [Ecto.UUID.t()]
+  def revoke_issued_from_code(code, client_id) do
+    now = now()
+
+    {_count, user_ids} =
+      from(f in McpOAuthRefreshTokenFamily,
+        join: c in McpOAuthAuthCode,
+        on: c.id == f.auth_code_id,
+        where: c.code == ^code and c.client_id == ^client_id,
+        where: not is_nil(c.used_at) and c.expires_at > ^now and is_nil(f.revoked_at),
+        select: f.user_id
+      )
+      |> Repo.update_all(set: [revoked_at: now, updated_at: now])
+
+    user_ids
   end
 
   @spec revoke_family(McpOAuthRefreshTokenFamily.t()) :: McpOAuthRefreshTokenFamily.t()
