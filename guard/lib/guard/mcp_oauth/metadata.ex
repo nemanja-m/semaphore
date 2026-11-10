@@ -17,6 +17,7 @@ defmodule Guard.McpOAuth.Metadata do
       "authorization_endpoint" => "#{issuer}/authorize",
       "token_endpoint" => "#{issuer}/token",
       "registration_endpoint" => "#{issuer}/register",
+      "client_id_metadata_document_supported" => true,
       "response_types_supported" => ["code"],
       "response_modes_supported" => ["query"],
       "grant_types_supported" => ["authorization_code", "refresh_token"],

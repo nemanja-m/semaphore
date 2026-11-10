@@ -12,7 +12,7 @@ defmodule Guard.McpOAuth.Token do
 
   alias Guard.{FrontRepo, Repo}
   alias Guard.Store.{McpOAuthAuthCode, McpOAuthRefreshToken}
-  alias Guard.McpOAuth.{Computers, JWT, PKCE}
+  alias Guard.McpOAuth.{ClientDocument, Computers, JWT, PKCE}
 
   @grant_types ["authorization_code", "refresh_token"]
 
@@ -74,6 +74,7 @@ defmodule Guard.McpOAuth.Token do
   # Never rolled back, so that a family revoked by a failing request stays revoked.
   defp refresh(params) do
     with {:ok, token, client_id} <- refresh_params(params),
+         :ok <- validate_document(client_id),
          {:ok, result} <- Repo.transaction(fn -> rotate(token, client_id, params["scope"]) end) do
       result
     end
@@ -192,6 +193,16 @@ defmodule Guard.McpOAuth.Token do
 
   defp refresh_params(_params),
     do: {:error, error_response("invalid_request", "refresh_token and client_id are required")}
+
+  # Read before the family is locked, as it may be fetched.
+  defp validate_document(client_id) do
+    with true <- ClientDocument.document?(client_id),
+         {:error, _reason} <- ClientDocument.fetch(client_id) do
+      {:error, invalid_refresh_token()}
+    else
+      _ -> :ok
+    end
+  end
 
   defp lock_refresh_token(token) do
     case McpOAuthRefreshToken.lock_by_token(token) do
