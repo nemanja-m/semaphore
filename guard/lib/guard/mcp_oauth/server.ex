@@ -5,7 +5,8 @@ defmodule Guard.McpOAuth.Server do
   Implements OAuth 2.0 endpoints for MCP client authentication:
   - /.well-known/oauth-authorization-server (RFC 8414)
   - /.well-known/openid-configuration (OIDC discovery for compatibility)
-  - /register (RFC 7591 - Dynamic Client Registration)
+  - /register (RFC 7591 - Dynamic Client Registration), the fallback for
+    clients without a Client ID Metadata Document
   - /authorize (Authorization endpoint)
   - /token (Token endpoint)
   - /grant-selection (Consent UI)
@@ -337,6 +338,7 @@ defmodule Guard.McpOAuth.Server do
         h1 { color: #333; margin-top: 0; font-size: 24px; }
         .client-info { background: #f8f9fa; padding: 15px; border-radius: 4px; margin: 20px 0; }
         .client-name { font-weight: bold; color: #333; }
+        .client-host { color: #666; font-size: 14px; }
         .scope-info { margin: 20px 0; }
         .scope-item { padding: 8px 0; border-bottom: 1px solid #eee; }
         .scope-item:last-child { border-bottom: none; }
@@ -355,12 +357,14 @@ defmodule Guard.McpOAuth.Server do
         <p class="user-info">Logged in as: #{html_escape(user.name || user.id)}</p>
         <div class="client-info">
           <span class="client-name">#{html_escape(validated_params.client_name)}</span>
+          #{if validated_params.client_host, do: ~s(<p class="client-host">Its details come from #{html_escape(validated_params.client_host)}.</p>)}
           <p>#{if validated_params.resource, do: "wants to use Semaphore Computer as you.", else: "wants to access your Semaphore account via MCP."}</p>
         </div>
         <div class="scope-info">
           <strong>Requested permissions:</strong>
           <div class="scope-item">#{if validated_params.resource, do: "Create Computers and Storage, and run commands, as your roles allow", else: "Access to MCP tools based on your permissions"}</div>
         </div>
+        #{if validated_params.local_redirect, do: ~s(<p class="client-host">After you authorize, you go back to a program on this computer, at localhost.</p>)}
         <form action="/mcp/oauth/grant-selection" method="post">
           <input type="hidden" name="client_id" value="#{html_escape(validated_params.client_id)}" />
           <input type="hidden" name="redirect_uri" value="#{html_escape(validated_params.redirect_uri)}" />
@@ -434,7 +438,7 @@ defmodule Guard.McpOAuth.Server do
           |> send_resp(400, "Invalid redirect_uri")
         end
 
-      {:error, :not_found} ->
+      {:error, _reason} ->
         conn
         |> put_resp_content_type("text/html")
         |> send_resp(400, "Invalid client_id")

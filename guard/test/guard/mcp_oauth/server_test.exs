@@ -301,6 +301,7 @@ defmodule Guard.McpOAuth.Server.Test do
       assert is_binary(body["authorization_endpoint"])
       assert is_binary(body["token_endpoint"])
       assert is_binary(body["registration_endpoint"])
+      assert body["client_id_metadata_document_supported"] == true
       assert is_list(body["response_types_supported"])
       assert body["grant_types_supported"] == ["authorization_code", "refresh_token"]
       assert is_list(body["code_challenge_methods_supported"])
@@ -1247,6 +1248,233 @@ defmodule Guard.McpOAuth.Server.Test do
 
       assert claims["scope"] == "mcp"
       assert claims["aud"] == Guard.McpOAuth.JWT.audience()
+    end
+  end
+
+  # ====================
+  # Client ID Metadata Documents
+  # ====================
+
+  describe "a client with a metadata document" do
+    setup do
+      bypass = Bypass.open()
+      System.put_env("MCP_OAUTH_CIMD_LOCAL_HOSTS", "localhost:#{bypass.port}")
+      Cachex.clear(Guard.McpOAuth.ClientDocument.cache())
+
+      on_exit(fn -> System.delete_env("MCP_OAUTH_CIMD_LOCAL_HOSTS") end)
+
+      path = "/clients/" <> String.duplicate("a", 300) <> ".json"
+      {:ok, bypass: bypass, path: path, client_id: "http://localhost:#{bypass.port}#{path}"}
+    end
+
+    defp document(client_id, changes \\ %{}) do
+      Map.merge(
+        %{
+          "client_id" => client_id,
+          "client_name" => "Document Client",
+          "redirect_uris" => [@redirect_uri],
+          "token_endpoint_auth_method" => "none"
+        },
+        changes
+      )
+    end
+
+    defp serve(bypass, path, body, headers \\ [{"cache-control", "max-age=600"}]) do
+      Bypass.expect(bypass, "GET", path, fn conn ->
+        headers
+        |> Enum.reduce(conn, fn {name, value}, conn ->
+          Plug.Conn.put_resp_header(conn, name, value)
+        end)
+        |> Plug.Conn.resp(200, if(is_binary(body), do: body, else: Jason.encode!(body)))
+      end)
+    end
+
+    defp authorize_document(client_id, user_id) do
+      {:ok, response} =
+        HTTPoison.get(
+          mcp_oauth_url("/authorize#{authorize_query(client_id)}"),
+          session_headers(user_id)
+        )
+
+      response
+    end
+
+    defp refused(response) do
+      assert response.status_code == 400
+      Jason.decode!(response.body)
+    end
+
+    test "signs in without registering, on a consent page that names its host", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(bypass, path, document(client_id))
+
+      response = authorize_document(client_id, user_id)
+      assert response.status_code == 200
+      assert response.body =~ "Document Client"
+      assert response.body =~ "Its details come from localhost."
+      assert response.body =~ "you go back to a program on this computer"
+
+      claims = complete_oauth_flow(%{client_id: client_id}, user_id)
+      assert claims["sub"] == user_id
+      refute Repo.exists?(from(c in Guard.Repo.McpOAuthClient, where: c.client_id == ^client_id))
+    end
+
+    test "is read once while its Cache-Control allows", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      Bypass.expect_once(bypass, "GET", path, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("cache-control", "public, max-age=600")
+        |> Plug.Conn.resp(200, Jason.encode!(document(client_id)))
+      end)
+
+      assert authorize_document(client_id, user_id).status_code == 200
+      assert authorize_document(client_id, user_id).status_code == 200
+    end
+
+    test "is refused when it names another client_id", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(
+        bypass,
+        path,
+        document(client_id, %{"client_id" => "https://evil.example/client.json"})
+      )
+
+      assert refused(authorize_document(client_id, user_id)) == %{
+               "error" => "invalid_client",
+               "error_description" => "client_id's metadata document names another client_id"
+             }
+    end
+
+    test "takes a loopback redirect_uri on any port when it lists one without a port", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(
+        bypass,
+        path,
+        document(client_id, %{"redirect_uris" => ["http://localhost/callback"]})
+      )
+
+      assert authorize_document(client_id, user_id).status_code == 200
+
+      {:ok, response} =
+        HTTPoison.get(
+          mcp_oauth_url(
+            "/authorize#{authorize_query(client_id, redirect_uri: "http://localhost:3000/other")}"
+          ),
+          session_headers(user_id)
+        )
+
+      assert refused(response)["error_description"] ==
+               "redirect_uri does not match registered URIs"
+    end
+
+    test "is refused for a redirect_uri it does not list", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(
+        bypass,
+        path,
+        document(client_id, %{"redirect_uris" => ["http://localhost:4000/callback"]})
+      )
+
+      assert refused(authorize_document(client_id, user_id))["error_description"] ==
+               "redirect_uri does not match registered URIs"
+    end
+
+    test "is refused for a confidential client", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(
+        bypass,
+        path,
+        document(client_id, %{"token_endpoint_auth_method" => "private_key_jwt"})
+      )
+
+      assert refused(authorize_document(client_id, user_id))["error_description"] =~
+               "token_endpoint_auth_method must be none"
+    end
+
+    test "is refused when it redirects", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      Bypass.expect_once(bypass, "GET", path, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "http://localhost:#{bypass.port}/elsewhere.json")
+        |> Plug.Conn.resp(302, "")
+      end)
+
+      assert refused(authorize_document(client_id, user_id))["error_description"] ==
+               "client_id's metadata document redirects"
+    end
+
+    test "is refused when it is over 5 KiB", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(bypass, path, document(client_id, %{"client_name" => String.duplicate("x", 6_000)}))
+
+      assert refused(authorize_document(client_id, user_id))["error_description"] ==
+               "client_id's metadata document is over 5120 bytes"
+    end
+
+    test "is refused on a private address, or over http, unless its host is local", %{
+      bypass: bypass,
+      path: path,
+      user_id: user_id
+    } do
+      for {client_id, reason} <- [
+            {"https://127.0.0.1:#{bypass.port}#{path}", "is on a private address"},
+            {"https://localhost#{path}", "is on a private address"},
+            {"https://[::1]:#{bypass.port}#{path}", "is on a private address"},
+            {"http://127.0.0.1:#{bypass.port}#{path}", "is not at an https URL"},
+            {"https://localhost:#{bypass.port}/", "is not at a URL with a path"},
+            {"https://localhost:#{bypass.port}/a/../b.json", "is at a URL with a . or .. segment"}
+          ] do
+        assert refused(authorize_document(client_id, user_id))["error_description"] ==
+                 "client_id's metadata document #{reason}"
+      end
+    end
+
+    test "refreshes while the document describes it, and not once it is gone", %{
+      bypass: bypass,
+      path: path,
+      client_id: client_id,
+      user_id: user_id
+    } do
+      serve(bypass, path, document(client_id))
+      tokens = exchange_code(%{client_id: client_id}, user_id)
+      assert {200, refreshed} = refresh(tokens["refresh_token"], client_id)
+
+      Cachex.clear(Guard.McpOAuth.ClientDocument.cache())
+      Bypass.down(bypass)
+
+      assert {400, %{"error" => "invalid_grant"}} = refresh(refreshed["refresh_token"], client_id)
     end
   end
 
